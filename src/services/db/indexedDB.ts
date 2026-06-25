@@ -264,13 +264,48 @@ class DatabaseService {
         const writeTx = db.transaction('keyval', 'readwrite');
         const writeStore = writeTx.objectStore('keyval');
         for (const [key, val] of Object.entries(this.keyValCache)) {
-          await writeStore.put(val, key);
+          if (key !== 'ark_saves_fallback' && key !== 'user_settings_fallback') {
+            await writeStore.put(val, key);
+          }
         }
         await writeTx.done;
 
-        // C. Clear localStorage as we are completely migrating away
+        // C. Check if IndexedDB has any saves. If empty, restore from fallback localStorage backup!
         try {
-          localStorage.clear();
+          const savesTx = db.transaction('saves', 'readonly');
+          const savesCount = await savesTx.objectStore('saves').count();
+          await savesTx.done;
+
+          if (savesCount === 0) {
+            const fallbackSaves = this.getFallbackSaves();
+            if (Object.keys(fallbackSaves).length > 0) {
+              console.log("Restoring fallback saves from localStorage into IndexedDB...");
+              const restoreTx = db.transaction('saves', 'readwrite');
+              const restoreStore = restoreTx.objectStore('saves');
+              for (const save of Object.values(fallbackSaves)) {
+                await restoreStore.put(save);
+              }
+              await restoreTx.done;
+            }
+          }
+        } catch (e) {
+          console.warn("Failed to restore saves from backup:", e);
+        }
+
+        // D. Clean up only specific obsolete legacy keys from localStorage to free up space,
+        // but KEEP the backup keys: user_settings_fallback, ark_saves_fallback
+        try {
+          const keepKeys = ['user_settings_fallback', 'ark_saves_fallback'];
+          const keysToRemove = [];
+          for (let i = 0; i < localStorage.length; i++) {
+            const k = localStorage.key(i);
+            if (k && !keepKeys.includes(k)) {
+              keysToRemove.push(k);
+            }
+          }
+          for (const k of keysToRemove) {
+            localStorage.removeItem(k);
+          }
         } catch (e) {
           // ignore
         }
@@ -330,11 +365,37 @@ class DatabaseService {
   }
 
   private getFallbackSaves(): Record<string, SaveFile> {
+    if (Object.keys(this.fallbackStore.saves).length === 0) {
+      try {
+        const fallbackSavesStr = localStorage.getItem('ark_saves_fallback');
+        if (fallbackSavesStr) {
+          this.fallbackStore.saves = JSON.parse(fallbackSavesStr);
+        }
+      } catch (e) {
+        console.warn("Failed to load fallback saves from localStorage:", e);
+      }
+    }
     return this.fallbackStore.saves;
   }
 
   private saveFallbackSaves(saves: Record<string, SaveFile>) {
     this.fallbackStore.saves = saves;
+    try {
+      // Keep only up to 5 saves in fallback localStorage to avoid QuotaExceededError
+      let savesToPersist = { ...saves };
+      const keys = Object.keys(savesToPersist);
+      if (keys.length > 5) {
+        const sortedKeys = keys.sort((a, b) => (savesToPersist[b].updatedAt || 0) - (savesToPersist[a].updatedAt || 0));
+        const keepKeys = sortedKeys.slice(0, 5);
+        savesToPersist = {};
+        for (const k of keepKeys) {
+          savesToPersist[k] = saves[k];
+        }
+      }
+      localStorage.setItem('ark_saves_fallback', JSON.stringify(savesToPersist));
+    } catch (e) {
+      console.warn("Failed to save fallback saves to localStorage:", e);
+    }
   }
 
   async checkConnection(): Promise<boolean> {
@@ -367,8 +428,29 @@ class DatabaseService {
 
       if (!db || this.isFallbackMode) {
         settings = this.keyValCache['user_settings_fallback'];
+        if (!settings) {
+          try {
+            const backup = localStorage.getItem('user_settings_fallback');
+            if (backup) {
+              settings = JSON.parse(backup);
+              this.keyValCache['user_settings_fallback'] = settings;
+            }
+          } catch (e) {
+            console.warn("Failed to parse settings backup from localStorage:", e);
+          }
+        }
       } else {
         settings = await db.get('settings', 'user_settings');
+        if (!settings) {
+          try {
+            const backup = localStorage.getItem('user_settings_fallback');
+            if (backup) {
+              settings = JSON.parse(backup);
+            }
+          } catch (e) {
+            console.warn("Failed to parse settings backup from localStorage:", e);
+          }
+        }
       }
       
       if (!settings) {
@@ -453,15 +535,20 @@ class DatabaseService {
 
   async saveSettings(settings: AppSettings): Promise<void> {
     try {
+      this.keyValCache['user_settings_fallback'] = settings;
+      try {
+        localStorage.setItem('user_settings_fallback', JSON.stringify(settings));
+      } catch (e) {
+        console.warn("Failed to write settings backup to localStorage:", e);
+      }
+
       const db = await this.getDB();
       if (!db || this.isFallbackMode) {
-        this.keyValCache['user_settings_fallback'] = settings;
         return;
       }
       await db.put('settings', settings, 'user_settings');
     } catch (e) {
       console.error("saveSettings failed, writing fallback:", e);
-      this.keyValCache['user_settings_fallback'] = settings;
     }
   }
 
@@ -489,28 +576,18 @@ class DatabaseService {
         _compressed: true
       };
       
+      // Always update our fallbackStore and localStorage backup!
+      const fallbackSaves = this.getFallbackSaves();
+      fallbackSaves[saveData.id] = compressedSave;
+      this.saveFallbackSaves(fallbackSaves);
+
       const db = await this.getDB();
       if (!db || this.isFallbackMode) {
-        const fallbackSaves = this.getFallbackSaves();
-        fallbackSaves[saveData.id] = compressedSave;
-        this.saveFallbackSaves(fallbackSaves);
         return;
       }
       await db.put('saves', compressedSave);
     } catch (e) {
       console.error('saveGameState failed to write to IndexedDB, writing to fallback:', e);
-      try {
-        const compressedSave: SaveFile = {
-          ...saveData,
-          data: CompressionUtils.compress(JSON.stringify(saveData.data)),
-          _compressed: true
-        };
-        const fallbackSaves = this.getFallbackSaves();
-        fallbackSaves[saveData.id] = compressedSave;
-        this.saveFallbackSaves(fallbackSaves);
-      } catch (inner) {
-        console.error("Saving fallback state completely failed:", inner);
-      }
     }
   }
 
@@ -527,6 +604,27 @@ class DatabaseService {
         rawSaves = Object.values(this.getFallbackSaves());
       } else {
         rawSaves = await db.getAll('saves');
+        // If IndexedDB is working but returns empty, try loading from our localStorage backup
+        if (rawSaves.length === 0) {
+          const fallbackSaves = Object.values(this.getFallbackSaves());
+          if (fallbackSaves.length > 0) {
+            rawSaves = fallbackSaves;
+            // Sync fallback saves back into IndexedDB in background
+            setTimeout(async () => {
+              try {
+                const restoreTx = db.transaction('saves', 'readwrite');
+                const restoreStore = restoreTx.objectStore('saves');
+                for (const s of fallbackSaves) {
+                  await restoreStore.put(s);
+                }
+                await restoreTx.done;
+                console.log("Successfully restored database saves from localStorage backup.");
+              } catch (err) {
+                console.warn("Failed to background sync fallback saves:", err);
+              }
+            }, 50);
+          }
+        }
       }
       
       return rawSaves.map((save: SaveFile) => {
@@ -553,11 +651,15 @@ class DatabaseService {
 
   async deleteSave(id: string): Promise<void> {
     try {
-      const db = await this.getDB();
-      if (!db || this.isFallbackMode) {
-        const fallbackSaves = this.getFallbackSaves();
+      // Always remove from fallback/backup too
+      const fallbackSaves = this.getFallbackSaves();
+      if (id in fallbackSaves) {
         delete fallbackSaves[id];
         this.saveFallbackSaves(fallbackSaves);
+      }
+
+      const db = await this.getDB();
+      if (!db || this.isFallbackMode) {
         return;
       }
       await db.delete('saves', id);
@@ -568,10 +670,15 @@ class DatabaseService {
 
   async clearAllSaves(): Promise<void> {
     try {
+      this.fallbackStore.saves = {};
+      try {
+        localStorage.removeItem('ark_saves_fallback');
+      } catch (e) {
+        console.warn("Failed to remove ark_saves_fallback from localStorage:", e);
+      }
+
       const db = await this.getDB();
       if (!db || this.isFallbackMode) {
-        this.fallbackStore.saves = {};
-        delete this.keyValCache['ark_saves_fallback'];
         return;
       }
       await db.clear('saves');

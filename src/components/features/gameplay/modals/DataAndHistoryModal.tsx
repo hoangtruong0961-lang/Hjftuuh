@@ -1,6 +1,6 @@
 import React from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Database, X, History, Save, Clock, Shield, Zap, BookOpen, Trash2 } from 'lucide-react';
+import { Database, X, History, Save, Clock, Shield, Zap, BookOpen, Trash2, Download, Upload } from 'lucide-react';
 import Button from '../../../ui/Button';
 import { ChatMessage } from '../../../../types';
 
@@ -23,12 +23,95 @@ interface DataAndHistoryModalProps {
     initialSaveList: SaveFile[];
     handleLoadSave: (save: SaveFile) => void;
     handleDeleteSave: (id: string) => void;
+    loadSaveLists?: () => void | Promise<void>;
 }
 
 const DataAndHistoryModal: React.FC<DataAndHistoryModalProps> = ({
     show, onClose, activeSaveTab, setActiveSaveTab, isMobile, history,
-    manualSaveList, autosaveList, initialSaveList, handleLoadSave, handleDeleteSave
+    manualSaveList, autosaveList, initialSaveList, handleLoadSave, handleDeleteSave,
+    loadSaveLists
 }) => {
+    const fileInputRef = React.useRef<HTMLInputElement>(null);
+
+    const handleDownloadSave = (save: SaveFile) => {
+        try {
+            const fileData = JSON.stringify(save, null, 2);
+            const blob = new Blob([fileData], { type: "application/json" });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement("a");
+            link.href = url;
+            
+            const safeName = save.name.toLowerCase().replace(/[^a-z0-9]/gi, '_');
+            const dateStr = new Date(save.updatedAt).toISOString().split('T')[0];
+            link.download = `save_${safeName}_${dateStr}.json`;
+            
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(url);
+        } catch (e) {
+            console.error("Failed to download save:", e);
+        }
+    };
+
+    const handleImportSaveFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+
+        try {
+            const fileText = await file.text();
+            const importedSave = JSON.parse(fileText);
+
+            if (!importedSave || typeof importedSave !== 'object') {
+                alert("Tệp lưu không hợp lệ.");
+                return;
+            }
+
+            if (!importedSave.id || !importedSave.name || !importedSave.data) {
+                alert("Cấu trúc tệp lưu không đúng hoặc thiếu dữ liệu.");
+                return;
+            }
+
+            const { dbService } = await import('../../../../services/db/indexedDB');
+            
+            let parsedData = importedSave.data;
+            if (typeof parsedData === 'string') {
+                try {
+                    const { CompressionUtils } = await import('../../../../utils/compression');
+                    if (importedSave._compressed) {
+                        parsedData = JSON.parse(CompressionUtils.decompress(parsedData));
+                    } else {
+                        parsedData = JSON.parse(parsedData);
+                    }
+                } catch (inner) {
+                    console.warn("Failed to parse/decompress imported save data, storing as is:", inner);
+                }
+            }
+
+            const saveData: any = {
+                id: importedSave.id,
+                name: importedSave.name + " (Nhập)",
+                createdAt: importedSave.createdAt || Date.now(),
+                updatedAt: Date.now(),
+                data: parsedData
+            };
+
+            await dbService.saveGameState(saveData);
+            
+            if (fileInputRef.current) {
+                fileInputRef.current.value = '';
+            }
+
+            if (loadSaveLists) {
+                await loadSaveLists();
+            }
+            
+            alert("Đã nhập tệp lưu thành công!");
+        } catch (error) {
+            console.error("Failed to import save file:", error);
+            alert("Lỗi khi đọc tệp lưu: " + (error instanceof Error ? error.message : String(error)));
+        }
+    };
     return (
         <AnimatePresence>
             {show && (
@@ -109,6 +192,30 @@ const DataAndHistoryModal: React.FC<DataAndHistoryModalProps> = ({
                             ) : (
                                 <div className="h-full flex flex-col overflow-hidden">
                                     <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
+                                        <div className="mb-4 flex flex-col sm:flex-row justify-between items-start sm:items-center bg-stone-300/40 dark:bg-slate-900/30 p-3 px-4 rounded-xl border border-stone-400/40 dark:border-slate-800/60 gap-3">
+                                            <div className="text-xs md:text-sm font-semibold text-stone-600 dark:text-slate-400">
+                                                Quản lý tệp dữ liệu lưu game của bạn
+                                            </div>
+                                            <div className="flex items-center gap-2 w-full sm:w-auto">
+                                                <input 
+                                                    type="file" 
+                                                    ref={fileInputRef} 
+                                                    onChange={handleImportSaveFile} 
+                                                    accept=".json" 
+                                                    className="hidden" 
+                                                />
+                                                <Button 
+                                                    variant="ghost" 
+                                                    size="sm" 
+                                                    onClick={() => fileInputRef.current?.click()}
+                                                    className="text-xs font-black uppercase tracking-wider py-2 px-3 flex items-center gap-1.5 border border-stone-400/50 dark:border-slate-700 hover:bg-mystic-accent hover:text-white dark:hover:bg-mystic-accent dark:hover:text-white transition-colors rounded-lg w-full sm:w-auto justify-center"
+                                                    icon={<Upload size={14} />}
+                                                >
+                                                    Nhập JSON
+                                                </Button>
+                                            </div>
+                                        </div>
+
                                         {(activeSaveTab === 'manual' ? manualSaveList : activeSaveTab === 'autosave' ? autosaveList : initialSaveList).length === 0 ? (
                                             <div className="text-center text-stone-400 dark:text-slate-500 py-20">
                                                 Chưa có tệp lưu {activeSaveTab === 'manual' ? 'thủ công' : activeSaveTab === 'autosave' ? 'tự động' : 'lượt 0'}.
@@ -140,6 +247,15 @@ const DataAndHistoryModal: React.FC<DataAndHistoryModalProps> = ({
                                                                 icon={<BookOpen size={16} />}
                                                             >
                                                                 Tải Dữ Liệu
+                                                            </Button>
+                                                            <Button 
+                                                                variant="ghost" 
+                                                                size="lg" 
+                                                                onClick={() => handleDownloadSave(save)}
+                                                                className="h-11 md:h-12 px-4 text-emerald-600 hover:bg-emerald-600/10 border border-stone-400/50 dark:border-slate-700 hover:border-emerald-500/50 transition-all rounded-xl"
+                                                                title="Tải tệp lưu về máy (.json)"
+                                                            >
+                                                                <Download size={18} />
                                                             </Button>
                                                             <Button 
                                                                 variant="ghost" 

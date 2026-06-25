@@ -428,6 +428,7 @@ const GameplayScreen: React.FC<NavigationProps> = ({ onNavigate, activeWorld, on
             initialSaveList={initialSaveList}
             handleLoadSave={handleLoadSave}
             handleDeleteSave={handleDeleteSave}
+            loadSaveLists={loadSaveLists}
 
             showCharModal={showCharModal}
             setShowCharModal={setShowCharModal}

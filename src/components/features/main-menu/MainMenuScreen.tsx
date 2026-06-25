@@ -45,7 +45,24 @@ export const MainMenuScreen: React.FC<NavigationProps> = ({ onNavigate, onGameSt
     return () => clearTimeout(timer);
   }, []);
 
-  const { hasSaves } = useDatabaseStatus();
+  const { hasSaves: dbHasSaves } = useDatabaseStatus();
+  const [menuHasSaves, setMenuHasSaves] = useState(false);
+  const [saveList, setSaveList] = useState<SaveFile[]>([]);
+  const manualSaves = saveList.filter(s => !s.id.startsWith('autosave-'));
+  const autoSaves = saveList.filter(s => s.id.startsWith('autosave-'));
+
+  useEffect(() => {
+    setMenuHasSaves(dbHasSaves);
+  }, [dbHasSaves]);
+
+  useEffect(() => {
+    const updateHasSaves = async () => {
+      const exists = await dbService.hasSaves();
+      setMenuHasSaves(exists);
+    };
+    updateHasSaves();
+  }, [saveList]);
+
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [showLoadModal, setShowLoadModal] = useState(false);
   const [showCharacterLibrary, setShowCharacterLibrary] = useState(false);
@@ -53,9 +70,6 @@ export const MainMenuScreen: React.FC<NavigationProps> = ({ onNavigate, onGameSt
   const [infoActiveTab, setInfoActiveTab] = useState<'info' | 'changelog'>('info');
   const [showDonateModal, setShowDonateModal] = useState(false);
   const [showToolsSubmenu, setShowToolsSubmenu] = useState(false);
-  const [saveList, setSaveList] = useState<SaveFile[]>([]);
-  const manualSaves = saveList.filter(s => !s.id.startsWith('autosave-'));
-  const autoSaves = saveList.filter(s => s.id.startsWith('autosave-'));
   const [activeSaveTab, setActiveSaveTab] = useState<'manual' | 'autosave'>('manual');
   
   const [toast, setToast] = useState<{show: boolean, message: string}>({show: false, message: ''});
@@ -119,6 +133,15 @@ export const MainMenuScreen: React.FC<NavigationProps> = ({ onNavigate, onGameSt
       if (savedBg) setBgImage(savedBg);
       const savedSettings = await dbService.getSettings();
       if (savedSettings) setSettings(savedSettings);
+
+      // Load initial saves list on mount to sync "Continue" button status and have modal cache ready
+      try {
+        const saves = await dbService.getAllSaves();
+        saves.sort((a, b) => b.updatedAt - a.updatedAt);
+        setSaveList(saves);
+      } catch (err) {
+        console.error("Error loading initial saves:", err);
+      }
     };
     loadData();
   }, []);
@@ -178,6 +201,28 @@ export const MainMenuScreen: React.FC<NavigationProps> = ({ onNavigate, onGameSt
       newSaves.sort((a, b) => b.updatedAt - a.updatedAt);
       setSaveList(newSaves);
       setToast({ show: true, message: "Đã xóa file save thành công!" });
+  };
+
+  const handleDownloadSave = (save: SaveFile) => {
+    try {
+        const fileData = JSON.stringify(save, null, 2);
+        const blob = new Blob([fileData], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        
+        const safeName = (save.name || 'save').toLowerCase().replace(/[^a-z0-9]/gi, '_');
+        const dateStr = new Date(save.updatedAt).toISOString().split('T')[0];
+        link.download = `save_${safeName}_${dateStr}.json`;
+        
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+        setToast({ show: true, message: "Đã tải file save về máy!" });
+    } catch (e) {
+        console.error("Failed to download save:", e);
+    }
   };
 
   const handleContinue = async () => {
@@ -273,7 +318,7 @@ export const MainMenuScreen: React.FC<NavigationProps> = ({ onNavigate, onGameSt
           {(() => {
             const menuItems = [
               { id: 'start', title: 'Khởi Tạo', icon: Play, onClick: () => onNavigate(GameState.WORLD_CREATION) },
-              { id: 'continue', title: 'Tiếp Tục', icon: Clock, disabled: !hasSaves, onClick: handleContinue },
+              { id: 'continue', title: 'Tiếp Tục', icon: Clock, disabled: !menuHasSaves, onClick: handleContinue },
               { id: 'data', title: 'Dữ Liệu', icon: Database, onClick: handleOpenLoadGame },
               { id: 'fanfic', title: 'Đồng Nhân', icon: FileText, onClick: () => onNavigate(GameState.FANFIC) },
               { id: 'train', title: 'Train Data', icon: Upload, onClick: () => onNavigate(GameState.KNOWLEDGE_TRAIN) },
@@ -288,7 +333,7 @@ export const MainMenuScreen: React.FC<NavigationProps> = ({ onNavigate, onGameSt
             return menuItems.map(item => {
               const IconComponent = item.icon;
               
-              if (item.id === 'continue' && !hasSaves) {
+              if (item.id === 'continue' && !menuHasSaves) {
                 return (
                   <div key={item.id} className="group flex items-center p-3 rounded-2xl opacity-40 cursor-not-allowed mb-3" style={{ background: s.flatBg, boxShadow: s.shadowInner }}>
                     <IconComponent size={20} className="mr-4" style={{ color: s.textMuted }} />
@@ -344,7 +389,7 @@ export const MainMenuScreen: React.FC<NavigationProps> = ({ onNavigate, onGameSt
            </div>
            <div className="flex items-center gap-3">
              <Database size={16} style={{ color: s.text }} />
-             <span className="text-[10px] uppercase font-bold tracking-widest" style={{ color: s.text }}>IndexedDB {hasSaves ? '(Active)' : ''}</span>
+             <span className="text-[10px] uppercase font-bold tracking-widest" style={{ color: s.text }}>IndexedDB {menuHasSaves ? '(Active)' : ''}</span>
            </div>
         </div>
 
@@ -414,9 +459,24 @@ export const MainMenuScreen: React.FC<NavigationProps> = ({ onNavigate, onGameSt
                                             {new Date(save.updatedAt).toLocaleString()}
                                         </div>
                                       </div>
-                                      <button onClick={(e) => handleDeleteClick(e, save.id)} className="w-10 h-10 flex items-center justify-center rounded-xl opacity-0 group-hover:opacity-100 transition-opacity" style={{ color: '#ef4444', backgroundColor: s.card, boxShadow: s.shadowInner }}>
-                                          <Trash2 size={16} />
-                                      </button>
+                                      <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                                        <button 
+                                          onClick={() => handleDownloadSave(save)} 
+                                          className="w-10 h-10 flex items-center justify-center rounded-xl opacity-0 group-hover:opacity-100 transition-opacity" 
+                                          style={{ color: '#10b981', backgroundColor: s.card, boxShadow: s.shadowInner }}
+                                          title="Tải tệp lưu (.json)"
+                                        >
+                                            <DownloadCloud size={16} />
+                                        </button>
+                                        <button 
+                                          onClick={(e) => handleDeleteClick(e, save.id)} 
+                                          className="w-10 h-10 flex items-center justify-center rounded-xl opacity-0 group-hover:opacity-100 transition-opacity" 
+                                          style={{ color: '#ef4444', backgroundColor: s.card, boxShadow: s.shadowInner }}
+                                          title="Xóa tệp lưu"
+                                        >
+                                            <Trash2 size={16} />
+                                        </button>
+                                      </div>
                                     </div>
                                   ))}
                                 </div>

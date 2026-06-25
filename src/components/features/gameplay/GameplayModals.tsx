@@ -112,7 +112,8 @@ interface GameplayModalsProps {
     autosaveList: SaveFile[];
     initialSaveList: SaveFile[];
     handleLoadSave: (save: SaveFile) => void;
-    handleDeleteSave: (id: string, type: 'manual' | 'auto' | 'initial') => void;
+    handleDeleteSave: (id: string, type?: 'manual' | 'auto' | 'initial') => void;
+    loadSaveLists?: () => void | Promise<void>;
 
     showCharModal: boolean;
     setShowCharModal: (v: boolean) => void;
@@ -193,6 +194,7 @@ export const GameplayModals: React.FC<GameplayModalsProps> = (props) => {
                 initialSaveList={props.initialSaveList}
                 handleLoadSave={props.handleLoadSave}
                 handleDeleteSave={props.handleDeleteSave}
+                loadSaveLists={props.loadSaveLists}
             />
 
             {/* CHARACTER MODAL */}
